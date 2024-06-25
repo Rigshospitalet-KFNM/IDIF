@@ -3,19 +3,13 @@
 import os
 import argparse
 import numpy as np
-import json
 import csv
 import matplotlib.pyplot as plt
 import nibabel as nib
-from scipy import ndimage
 from skimage.measure import label, regionprops
 from scipy.ndimage import binary_dilation
 
-from rhkinetics.lib import dcm
-from rhkinetics.lib import plotting
-from rhkinetics.lib import roi
-from rhkinetics.lib import moose, totalsegmentator
-from rhkinetics.lib import pet
+import lib
 
 __scriptname__ = 'idif'
 __version__ = '0.3.1'
@@ -48,8 +42,6 @@ def aorta_segment(aortamask: np.ndarray=bool):
     # Correct
     nclusters[nclusters>2] = 2
 
-    # Find islands of connected ones in nclusters
-    #islands = np.flatnonzero(np.diff(np.r_[0,nclusters,0])!=0).reshape(-1,2) - [0,1]
     # Get start, stop index pairs for islands/seq. of 1s
     idx_pairs = np.where(np.diff(np.hstack(([False],nclusters==1,[False]))))[0].reshape(-1,2)
     
@@ -83,7 +75,6 @@ def aorta_segment(aortamask: np.ndarray=bool):
             aortamask_segmented[:,:,slices_two[0]:slices_desc[0]] =  aortamask_segmented[:,:,slices_two[0]:slices_desc[0]] + (label_img_2[:,:,0:-1]==cluster)*2
 
     aortamask_segmented[:,:,slices_arch] = aortamask[:,:,slices_arch] * 2
-    ##########
     return aortamask_segmented
 
 
@@ -95,10 +86,15 @@ def main():
     # Required arguments
     parser.add_argument('-i','--data', help='Input directory (dynamic DICOM)', required=True)
     parser.add_argument('-s','--segmentation', help='Organ segmentation directory (DICOM)', required=True)
+    parser.add_argument('-l','--labelmap', help='Organ segmentation directory (DICOM)', choices=['TotalSegmentator','custom'], default='TotalSegmentator' required=True)
+    parser.add_argument('-a','--aortaidx', help='Aorta idx in the segmentation (if custom labelmap)', default=52, type=int, required=False)
     parser.add_argument('-o','--outdir', help='Output directory', required=True)
 
     # Parse arguments
     args = parser.parse_args()
+
+    LABELMAP = args.labelmap
+    AORTAIDX = args.aortaidx
 
     if not os.path.isdir(args.outdir):
         os.makedirs(args.outdir)
@@ -110,7 +106,7 @@ def main():
         filelist_label.extend(os.path.join(dirpath, x) for x in files if x.endswith(('.IMA', '.dcm')))
 
     # Read segmentation data into deck
-    hdr_label, deck_label = dcm.dcmread_folder(filelist_label)
+    hdr_label, deck_label = lib.dcmread_folder(filelist_label)
     deck_label = np.squeeze(deck_label) # data is loaded with a 4th dimension - THIS SHOULD BE FIXED IN quadra_reslice.py !!!
 
     xdim,ydim,nslices = deck_label.shape
@@ -125,14 +121,10 @@ def main():
 
     # Get label value for aorta in segmentation
     method = hdr_label['SeriesDescription']
-    if method == 'TotalSegmentator':
-        regionidx = totalsegmentator.get_regionidx('aorta') # totalsegmentator
-    elif method == 'TotalSegmentator-v2':
-        regionidx = totalsegmentator.get_regionidx_v2('aorta') # totalsegmentator-v2
-    elif method == 'MOOSE':
-        regionidx = moose.get_regionidx('aorta') # MOOSE
-    elif method == 'SegThor':
-        regionidx = 4 # segthor
+    if LABELMAP == 'TotalSegmentator':
+        regionidx = lib.get_regionidx_v2('aorta') # totalsegmentator-v2
+    elif LABELMAP == 'custom':
+        regionidx = AORTAIDX # custom
     else:
         raise SystemExit('No header label match')
 
@@ -142,7 +134,7 @@ def main():
     aortamask = (deck_label == regionidx)
 
     # Get slices containing region
-    xmin, xsize, ymin, ysize, zmin, zsize = roi.bbox(aortamask)
+    xmin, xsize, ymin, ysize, zmin, zsize = lib.bbox(aortamask)
     # Get slices containing region
     slicesum = np.sum(aortamask.astype(int), axis=(0, 1))
     slices_nonzero = [i for i, e in enumerate(slicesum) if e > 0]
@@ -155,33 +147,28 @@ def main():
 
     ### Read Dynamical Data (Only slices within aorta) ###
     # Create mlist dictionary of all files in PET directory
-    # Check if file already exist
     print("Load PET data:")
-    if os.path.isfile(args.data+'.tsv'):
-        print('  Reading existing mlist file')
-        mlist = dcm.dcmmlistread(args.data+'.tsv')
-    else:
-        study_dict = dcm.dcmmlist(filelist)
+    study_dict = lib.dcmmlist(filelist)
 
-        # Get StudyInstanceUID(s)
-        StudyInstanceUID = list(study_dict.keys())
+    # Get StudyInstanceUID(s)
+    StudyInstanceUID = list(study_dict.keys())
 
-        if len(StudyInstanceUID) > 1:
-            raise SystemExit('  More than one DICOM study in PET directory... Aborting!')
+    if len(StudyInstanceUID) > 1:
+        raise SystemExit('More than one DICOM study in PET directory... Aborting!')
 
-        # Get SeriesInstanceUID(s)
-        SeriesInstanceUID = list(study_dict[StudyInstanceUID[0]].keys())
+    # Get SeriesInstanceUID(s)
+    SeriesInstanceUID = list(study_dict[StudyInstanceUID[0]].keys())
 
-        if len(SeriesInstanceUID) > 1:
-            raise SystemExit('  More than one DICOM series in PET directory... Aborting!')
+    if len(SeriesInstanceUID) > 1:
+        raise SystemExit('More than one DICOM series in PET directory... Aborting!')
 
-        mlist = study_dict[StudyInstanceUID[0]][SeriesInstanceUID[0]]['mlist']
+    mlist = study_dict[StudyInstanceUID[0]][SeriesInstanceUID[0]]['mlist']
 
     # Read only slices with aorta
     filtered = filter(lambda row: row[0]-1 in slices, mlist)
 
     # Read dynamical PET data
-    hdr_pet, deck = dcm.dcmmlist_read(list(filtered))
+    hdr_pet, deck = lib.dcmmlist_read(list(filtered))
 
     # Get Spatial information
     xdim,ydim,nslices,nframes = deck.shape
@@ -201,7 +188,7 @@ def main():
     suvframes = FrameDuration==np.unique(FrameDuration)[0]
     #suvframes = FrameTimesStart < 40
 
-    SUV = pet.suv(deck[:,:,:,suvframes],hdr_pet['RadionuclideInjectedDose'],hdr_pet['PatientWeight'])
+    SUV = lib.suv(deck[:,:,:,suvframes],hdr_pet['RadionuclideInjectedDose'],hdr_pet['PatientWeight'])
 
     # Compute median SUV value inside aortamask
     SUV_median = np.median(SUV[aortamask])
@@ -226,7 +213,7 @@ def main():
     aortamask = aortamask*np.int8(SUV>SUV_median/1.5)
 
     # Count number of clusters
-    nclusters = roi.count_clusters(aortamask)
+    nclusters = lib.count_clusters(aortamask)
     print(f'Number of Clusters found in Aorta Segmentation: {nclusters}')
 
     if nclusters > 1:
@@ -236,7 +223,7 @@ def main():
         # Keep only cluster above threshold
         volthreshold=20
         print(f'Reomving cluster(s) with volume lower than {volthreshold*np.prod(voxdim)/1000:.2f} ml')
-        aortamask_tmp, nclusters = roi.threshold_clusters(aortamask, volthreshold=volthreshold)
+        aortamask_tmp, nclusters = lib.threshold_clusters(aortamask, volthreshold=volthreshold)
 
         print(f'  Remaining clusters: {nclusters}')
 
@@ -383,11 +370,11 @@ def main():
         #np.save(voifile,VOI)
 
         # Write IDIF to file
-        pet.tacwrite(FrameTimesStart,FrameDuration,idif[:,seg],'Bq/cc',os.path.join(args.outdir,'IDIF_'+method.lower()+'_segment-'+str(seg+1)+'.tac'),['idif'])
+        lib.tacwrite(FrameTimesStart,FrameDuration,idif[:,seg],'Bq/cc',os.path.join(args.outdir,'IDIF_'+method.lower()+'_segment-'+str(seg+1)+'.tac'),['idif'])
 
     # Create plot for evalutating aorta mask position on SUV PET
     plotting.ortoshow(SUV,overlay=VOI[...,0]+(VOI[...,1]*2)+(VOI[...,2]*3)+(VOI[...,3]*4), vmin=0, vmax=20, cmap='tab20', voxdim=voxdim, mip=True, outfile=os.path.join(args.outdir,'QUADRA_VOI_orto.pdf'))
-    print(os.path.join(args.outdir,'QUADRA_VOI_orto.pdf'))
+    print(os.path.join(args.outdir,'VOI_orto.pdf'))
 
     # Save a tsv file with IDIF stats
     tsvfilename = os.path.join(args.outdir,method.lower()+'_IDIF.tsv')
