@@ -17,9 +17,9 @@ from rhkinetics.lib import roi
 from rhkinetics.lib import moose, totalsegmentator
 from rhkinetics.lib import pet
 
-__scriptname__ = 'quadra_idif'
+__scriptname__ = 'idif'
 __version__ = '0.3.1'
-__author__ = 'Ulrich Lindberg'
+__author__ = 'TLA & UL'
 
 def aorta_segment(aortamask: np.ndarray=bool):
     """ Segment aorta in four segments with value:
@@ -82,76 +82,6 @@ def aorta_segment(aortamask: np.ndarray=bool):
         if np.sum((label_img_2==cluster)*(aortamask_segmented[:,:,slices_two[0]:slices_desc[0]+1]==4)):
             aortamask_segmented[:,:,slices_two[0]:slices_desc[0]] =  aortamask_segmented[:,:,slices_two[0]:slices_desc[0]] + (label_img_2[:,:,0:-1]==cluster)*2
 
-    # Find middle slice in slices_two
-    #slices_two_midslice = (slices_two[-1]-slices_two[0])//2 + slices_two[0]
-
-    # Find center of gravity for the two clusters
-    #label_img = label(aortamask[:,:,slices_two_midslice], return_num=False)
-    #regions = regionprops(label_img)
-
-    #y0 = np.zeros((2,))
-    #x0 = np.zeros((2,))
-
-    #for i,props in enumerate(regions):
-    #    y0[i], x0[i] = props.centroid
-    #    if i>1:
-    #        break
-
-    # fig, ax = plt.subplots()
-    # ax.imshow(aortamask[:,:,slices_two_midslice], cmap=plt.cm.gray)
-
-    # for props in regions:
-    # 	y0, x0 = props.centroid
-    # 	orientation = props.orientation
-    # 	x1 = x0 + math.cos(orientation) * 0.5 * props.axis_minor_length
-    # 	y1 = y0 - math.sin(orientation) * 0.5 * props.axis_minor_length
-    # 	x2 = x0 - math.sin(orientation) * 0.5 * props.axis_major_length
-    # 	y2 = y0 - math.cos(orientation) * 0.5 * props.axis_major_length
-
-    # 	ax.plot((x0, x1), (y0, y1), '-r', linewidth=1.5)
-    # 	ax.plot((x0, x2), (y0, y2), '-r', linewidth=1.5)
-    # 	ax.plot(x0, y0, '.g', markersize=5)
-
-    # 	minr, minc, maxr, maxc = props.bbox
-    # 	bx = (minc, maxc, maxc, minc, minc)
-    # 	by = (minr, minr, maxr, maxr, minr)
-    # 	ax.plot(bx, by, '-b', linewidth=1.5)
-
-    # ax.axis((0, xdim, ydim, 0))
-    # plt.show()
-
-    # Calculate slope between the two center of gravity points
-    #slope = (y0[0]-y0[1])/(x0[0]-x0[1])
-
-    # Calculate center of gravity of top slice (top of arch)
-    #label_img = label(aortamask[:,:,0], return_num=False)
-    #region = regionprops(label_img)
-    #y1, x1 = region[0].centroid
-
-    # Create line from x0,y0,z0 to x1,y1,z1
-    #mx = (x0[0] + np.diff(x0)[0]/2)-x1
-    #my = (y0[0] + np.diff(y0)[0]/2)-y1
-    #mz = slices_two_midslice
-
-    #for slc in slices_arch:
-    #    p = np.array([x1,y1,0])+(slc/mz)*np.array([mx,my,mz])
-
-        # Create perpendicular line dividing ascendens from descendens in the cog point
-    #    B = [p[1],p[0]]
-
-        # Loop over all column positions and set value
-    #    for col in range(0,np.size(aortamask,1)):
-    #        xmax = int(np.ceil((B[1]*slope+B[0])-(col*slope)))
-    #        if xmax > np.size(aortamask,0):
-    #            xmax = np.size(aortamask,0)
-    #        if xmax < 0:
-    #            xmax = 0
-
-    	    # Set descending part to value 2
-    #       aortamask_segmented[xmax:,col,slc] = aortamask[xmax:,col,slc] * 2
-
-    #### TEMP: Set Aorta Arch to value 2
-    #aortamask_segmented[:,:,0:slices_two[0]] = aortamask[:,:,0:slices_two[0]] * 2
     aortamask_segmented[:,:,slices_arch] = aortamask[:,:,slices_arch] * 2
     ##########
     return aortamask_segmented
@@ -159,11 +89,11 @@ def aorta_segment(aortamask: np.ndarray=bool):
 
 def main():
     # Create argument parser
-    parser = argparse.ArgumentParser(prog='QUADRA_IDIF', description='Image derived input function of dynamic PET data')
+    parser = argparse.ArgumentParser(prog='IDIF', description='Image derived input function of dynamic PET data')
     parser.add_argument('-v','--version', action='version', version='%(prog)s {version}'.format(version=__version__))
 
     # Required arguments
-    parser.add_argument('-i','--data', help='Input directory (DICOM)', required=True)
+    parser.add_argument('-i','--data', help='Input directory (dynamic DICOM)', required=True)
     parser.add_argument('-s','--segmentation', help='Organ segmentation directory (DICOM)', required=True)
     parser.add_argument('-o','--outdir', help='Output directory', required=True)
 
@@ -210,9 +140,6 @@ def main():
 
     # Get only aorta from segmentation mask
     aortamask = (deck_label == regionidx)
-
-    # Assert that aorta mask is only one cluster
-    #aortamask = roi.keep_largest_cluster(aortamask)
 
     # Get slices containing region
     xmin, xsize, ymin, ysize, zmin, zsize = roi.bbox(aortamask)
@@ -375,12 +302,6 @@ def main():
     M = pet.montage(aortamask_segmented[xmin:xmin+xsize,ymin:ymin+ysize,zmin:zmin+zsize])
     plotting.imshow(M,vmin=0,vmax=4,cmap='viridis',outfile=os.path.join(args.outdir,'aorta.pdf'))
 
-    # if hdr_label['dimlabel'][-2::] == 'si':
-    #     slices = range(slices_nonzero[0],slices_nonzero[-1]+1)
-    # else:
-    #     # Flip slices
-    #     slices = range((slices_nonzero[-1]-nslices)*-1,-1*(slices_nonzero[0]-nslices)+1)
-
     # Create plot for evalutating aorta mask position on SUV PET
     plotting.ortoshow(SUV,overlay=aortamask_segmented, cmap='tab20', vmin=0, vmax=20, voxdim=voxdim, mip=True, outfile=os.path.join(args.outdir,'mask_orto.pdf'))
 
@@ -462,7 +383,6 @@ def main():
         #np.save(voifile,VOI)
 
         # Write IDIF to file
-        #pet.tacwrite(FrameTimesStart,FrameDuration,idif[:,seg],'Bq/cc',os.path.join(args.outdir,'QUADRA_segment-'+str(seg+1)+'_IDIF.tac'),['idif'])
         pet.tacwrite(FrameTimesStart,FrameDuration,idif[:,seg],'Bq/cc',os.path.join(args.outdir,'IDIF_'+method.lower()+'_segment-'+str(seg+1)+'.tac'),['idif'])
 
     # Create plot for evalutating aorta mask position on SUV PET
