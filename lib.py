@@ -518,3 +518,34 @@ def threshold_clusters(mask: np.ndarray, volthreshold: float):
         mask = label_img==np.argmax(clustersize)+1
 
     return mask, nclusters
+
+def tacwrite(FrameTimesStart: np.ndarray,FrameDuration: np.ndarray,tac:np.ndarray,unit:str,outfile:str,label=None):
+	""" Export .tac file format for use with Turku PET center kinetics
+	"""
+
+	# Create Header
+	header = []
+	if label is None:
+		label = ['tac1']
+		if tac.ndim > 1:
+			for i in range(2,np.size(tac,1)+1):
+				label += ['tac'+str(i)]
+	#header = ['start[seconds]', 'end['+unit+']'] + label
+	header.extend(('start[seconds]', 'end['+unit+']', label))
+
+	# Concatenate columns of time and signal
+	outarray = np.stack((FrameTimesStart,FrameTimesStart+FrameDuration,tac),axis=1)
+	# outarray = np.concatenate((np.stack((FrameTimesStart,FrameTimesStart+FrameDuration),axis=1),tac),axis=1)
+
+	with open(outfile, 'w', encoding='UTF8', newline='') as f:
+		writer = csv.writer(f, delimiter='\t')
+
+		# write the header
+		writer.writerow(header)
+
+		# write multiple rows
+		writer.writerows(outarray)
+
+	f.close()
+
+	return outfile
