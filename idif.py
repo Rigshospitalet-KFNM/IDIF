@@ -6,12 +6,13 @@ import os
 from os import makedirs
 from os.path import isdir, splitext
 import matplotlib.pyplot as plt
-from skimage.measure import label
+from skimage.measure import label, regionprops
+from scipy.ndimage import binary_dilation
 
 import lib
 
 __scriptname__ = 'idif'
-__version__ = '0.3.1'
+__version__ = '0.3.2'
 
 def aorta_segment(aortamask: np.ndarray=bool):
   """ Segment aorta in four segments with value:
@@ -35,7 +36,6 @@ def aorta_segment(aortamask: np.ndarray=bool):
 
   # Compute volume within each slice
   volume = np.count_nonzero(aortamask,axis=(0,1))
-  print(np.mean(volume[nclusters==1]),np.mean(volume[nclusters==2]))
 
   # Correct
   nclusters[nclusters>2] = 2
@@ -100,13 +100,31 @@ if __name__ == '__main__':
     makedirs(args.outdir)
 
   # Read segmentation data into deck
+  print("Load label mask:")
   labelObj = nib.load(LABELPATH)
-  hdr_label = labelObj.header
+
+  # Reorient label to be AP,LR,SI
+  ornt_orig = nib.orientations.io_orientation(labelObj.affine)
+  ornt_targ = nib.orientations.axcodes2ornt('PRI')
+  transform = nib.orientations.ornt_transform(ornt_orig, ornt_targ)
+  
+  labelObj = labelObj.as_reoriented(transform)
+  
+  imadim = labelObj.header.get_data_shape()
+  voxdim = labelObj.header.get_zooms()
+
   deck_label = labelObj.get_fdata()
+
+  # Re-orient if needed
+  # if nib.aff2axcodes(labelObj.affine) == ('R', 'A', 'S'):
+  #   deck_label = deck_label.transpose((1,0,2))[::-1,:,::-1]
+  # elif nib.aff2axcodes(labelObj.affine) == ('L', 'A', 'S'):
+  #   deck_label = deck_label.transpose((1,0,2))[::-1,::-1,::-1]
 
   xdim,ydim,nslices = deck_label.shape
       
-  print(f"Label dimensions: {deck_label.shape}")
+  print(f"Label data dimensions: {xdim}x{ydim}x{nslices}")
+  print(f"Label voxel dimensions: {voxdim[0]:.2f}x{voxdim[1]:.2f}x{voxdim[2]:.2f}")
 
   # Get label value for aorta in segmentation
   if LABELMAPTYPE == 'TotalSegmentator':
@@ -117,28 +135,34 @@ if __name__ == '__main__':
     raise SystemExit('No label match')
 
   print(f'Method: {LABELMAPTYPE}, Aorta label: {regionidx}')
-
+  method = LABELMAPTYPE
   # Get only aorta from segmentation mask
   aortamask = (deck_label == regionidx)
 
   # Get slices containing region
   xmin, xsize, ymin, ysize, zmin, zsize = lib.bbox(aortamask)
+  
   # Get slices containing region
-  slicesum = np.sum(aortamask.astype(int), axis=(0, 1))
-  slices_nonzero = [i for i, e in enumerate(slicesum) if e > 0]
   aortamask = aortamask[:,:,zmin:zmin+zsize]
 
   ### Read Dynamical Data (Only slices within aorta) ###
   # Create mlist dictionary of all files in PET directory
   print("Load PET data:")
   dataObj = nib.load(PETDATAPATH)
-  hdr_pet = dataObj.header
-  deck = dataObj.get_fdata()
-  deck = deck[:,:,slices_nonzero,:]
+
+  # Reorient label to be AP,LR,SI
+  ornt_orig = nib.orientations.io_orientation(dataObj.affine)
+  ornt_targ = nib.orientations.axcodes2ornt('PRI')
+  transform = nib.orientations.ornt_transform(ornt_orig, ornt_targ)
+  
+  dataObj = dataObj.as_reoriented(transform)
+
+  # Only load slices within aortamask
+  deck = dataObj.dataobj[:,:,zmin:zmin+zsize,:]
 
   # Get Spatial information
   xdim,ydim,nslices,nframes = deck.shape
-  #xdim,ydim,nslices = deck.shape
+
   print(PETDATAPATH)
   if '.nii.gz' in PETDATAPATH:
     JSONPATH = splitext(splitext(PETDATAPATH)[0])[0]
@@ -149,55 +173,24 @@ if __name__ == '__main__':
       PETMETADATA = json.load(fr)
   except FileNotFoundError as fnfe:
     raise SystemExit('Did not find the needed .json file with frametimes from dcm2niix')
-  print(PETMETADATA['FrameTimesStart'])
-  print(hdr_pet['pixdim'][1],hdr_pet['pixdim'][2])
-  #exit()
-  voxdim = np.array([hdr_pet['pixdim'][1], hdr_pet['pixdim'][2], hdr_pet['pixdim'][3]])
-    
+  
   # Get time info from header
   FrameTimesStart = np.array(PETMETADATA['FrameTimesStart'])
   FrameDuration = np.array(PETMETADATA['FrameDuration'])
   MidFrameTime = FrameTimesStart + FrameDuration/2.0
 
-  # Create SUV from first 40 second frames
-  frames = FrameDuration == np.unique(FrameDuration)[0]
-  #meanframes = FrameTimesStart < 40
-  mean = np.mean(deck[...,frames], axis=-1)
+  # Create average image from first 40 second frames
+  #frames = FrameDuration == np.unique(FrameDuration)[0]
+  frames = FrameTimesStart <= 40
+  SUV = np.mean(deck[...,frames], axis=-1)
 
-  # Compute median SUV value inside aortamask
-  median = np.median(mean[aortamask])
-  print(f'Median SUV inside Aorta Mask: {median}')
-  #exit()
-  
-  # Create SUV from 5 to 40 seconds
-  #print(f"Create SUV map. TotalDose: {hdr_pet['RadionuclideInjectedDose']/1e6} MBq, PatientWeight: {hdr_pet['PatientWeight']} kg")
-  # Create SUV from first 40 second frames
-  #suvframes = FrameDuration==np.unique(FrameDuration)[0]
-  #suvframes = FrameTimesStart < 40
-
-  #SUV = lib.suv(deck[:,:,:,suvframes],hdr_pet['RadionuclideInjectedDose'],hdr_pet['PatientWeight'])
-
-  # Compute median SUV value inside aortamask
-  #SUV_median = np.median(SUV[aortamask])
-  #print(f'Median SUV inside Aorta Mask: {SUV_median}')
-
-  # Create figure of SUV overlayed with aorta VOI
-  #fig, ax = plt.subplots(1,2, constrained_layout=True)
-  # Sag
-  #ax[0].imshow(np.transpose(np.max(SUV[::-1,:,:],axis=1), (1, 0)), vmin=0, vmax=2*SUV_median, cmap='gray_r', 
-  #    aspect=hdr_pet['SliceThickness']/hdr_pet['PixelSpacing'][1])
-  #plotting.plot_outlines(np.transpose(np.max(aortamask[::-1,:,:],axis=1), (1, 0)).T, ax=ax[0], lw=0.5, color='r')
-  #ax[0].axis('off')
-  # Cor
-  #ax[1].imshow(np.transpose(np.max(SUV,axis=0), (1, 0)), vmin=0, vmax=SUV_median*2, cmap='gray_r', 
-  #    aspect=hdr_label['SliceThickness']/hdr_label['PixelSpacing'][0])
-  #plotting.plot_outlines(np.transpose(np.max(aortamask,axis=0), (1, 0)).T, ax=ax[1], lw=0.5, color='r')
-  #ax[1].axis('off')
-  #plt.suptitle('Aorta Segmentation')
-  #plt.savefig(os.path.join(args.outdir,'segmentation.pdf'))
+  # Compute median value inside aortamask
+  median = np.median(SUV[aortamask])
+  print(f'Median signal inside Aorta Mask: {median:.0f}')
 
   # Threshold aortamask with median(SUV)/1.5
-  aortamask = aortamask*np.int8(mean>median/1.5)
+  # This removes voxels within mask that is not part of the PET signal
+  aortamask = aortamask*np.int8(SUV>median/1.5)
 
   # Count number of clusters
   nclusters = lib.count_clusters(aortamask)
@@ -221,17 +214,17 @@ if __name__ == '__main__':
       # Loop over axial slices and count number of clusters
       nrois = np.zeros((nslices,),dtype=int)
       for slc in range(nslices-1,-1,-1):
-        nrois[slc] = roi.count_clusters(aortamask[:,:,slc])
+        nrois[slc] = lib.count_clusters(aortamask[:,:,slc])
 
         if nrois[slc] == 0 or np.count_nonzero(aortamask[:,:,slc])<3:
           # Get bounding box for the two slices below
-          xmin_tmp, xsize_tmp, ymin_tmp, ysize_tmp, _, _ = roi.bbox(aortamask[:,:,slc+1:slc+3])
+          xmin_tmp, xsize_tmp, ymin_tmp, ysize_tmp, _, _ = lib.bbox(aortamask[:,:,slc+1:slc+3])
 
           xmid_tmp = xmin_tmp+xsize_tmp//2
           ymid_tmp = ymin_tmp+ysize_tmp//2
 
           # Keep only largest cluster if multiple
-          maskimg = roi.keep_largest_cluster(SUV[xmid_tmp-5:xmid_tmp+5,ymid_tmp-5:ymid_tmp+5,slc]>SUV_median/1.5)
+          maskimg = lib.keep_largest_cluster(SUV[xmid_tmp-5:xmid_tmp+5,ymid_tmp-5:ymid_tmp+5,slc]>median/1.5)
 
           # Run region props on binary mask add SUV image for weighted centroid estimation
           regions = regionprops(label(maskimg), intensity_image=SUV[xmid_tmp-5:xmid_tmp+5,ymid_tmp-5:ymid_tmp+5,slc])
@@ -241,30 +234,17 @@ if __name__ == '__main__':
               
         # Dilate and threshold to account for aortavoxels outside segmentation
         aortamask_dilated = binary_dilation(aortamask[:,:,slc])
-        aortamask[:,:,slc] = aortamask_dilated*np.int8(SUV[:,:,slc]>SUV_median/1.5)
+        aortamask[:,:,slc] = aortamask_dilated*np.int8(SUV[:,:,slc]>median/1.5)
 
   # Create figure of SUV overlayed with aorta VOI
-  fig, ax = plt.subplots(1,2, constrained_layout=True)
-  # Sag
-  ax[0].imshow(np.transpose(np.max(mean[::-1,:,:],axis=1), (1, 0)), vmin=0, vmax=2*median, cmap='gray_r', 
-      aspect=voxdim[-1]/voxdim[0])
-  lib.plot_outlines(np.transpose(np.max(aortamask[::-1,:,:],axis=1), (1, 0)).T, ax=ax[0], lw=0.5, color='r')
-  ax[0].axis('off')
-  # Cor
-  ax[1].imshow(np.transpose(np.max(mean,axis=0), (1, 0)), vmin=0, vmax=median*2, cmap='gray_r', 
-      aspect=voxdim[-1]/voxdim[0])
-  lib.plot_outlines(np.transpose(np.max(aortamask,axis=0), (1, 0)).T, ax=ax[1], lw=0.5, color='r')
-  ax[1].axis('off')
-  plt.suptitle('Aorta Segmentation')
-  plt.savefig(os.path.join(args.outdir,'segmentation_corr.pdf'))
-  print(os.path.join(args.outdir,'segmentation_corr.pdf'))
+  lib.ortoshow(SUV,overlay=aortamask, cmap='tab20', vmin=0, vmax=2*median, voxdim=voxdim, mip=True, outfile=os.path.join(args.outdir,'segmentation_orto.pdf'))
 
   ### Segment aorta in four segments ###
   segments = ['Aorta asc', 'Aortic arch', 'Aorta desc (upper)', 'Aorta desc (lower)']
   aortamask_segmented = aorta_segment(aortamask)
 
   # Create bounding box for figure
-  xmin, xsize, ymin, ysize, zmin, zsize = roi.bbox(aortamask_segmented>0)
+  xmin, xsize, ymin, ysize, zmin, zsize = lib.bbox(aortamask_segmented>0)
 
   # Create square box with original centers
   xmid = xmin+xsize//2
@@ -277,7 +257,7 @@ if __name__ == '__main__':
   lib.imshow(M,vmin=0,vmax=4,cmap='viridis',outfile=os.path.join(args.outdir,'aorta.pdf'))
 
   # Create plot for evalutating aorta mask position on SUV PET
-  plotting.ortoshow(SUV,overlay=aortamask_segmented, cmap='tab20', vmin=0, vmax=20, voxdim=voxdim, mip=True, outfile=os.path.join(args.outdir,'mask_orto.pdf'))
+  lib.ortoshow(SUV,overlay=aortamask_segmented, cmap='tab20', vmin=0, vmax=2*median, voxdim=voxdim, mip=True, outfile=os.path.join(args.outdir,'mask_orto.pdf'))
 
   ### Create VOI inside aorta arch of approx 1 mL ###
   thr = 1000//np.prod(voxdim)
@@ -305,7 +285,7 @@ if __name__ == '__main__':
       # Position 3x3xN VOI within segment with detected center slice
       for slc in range(middleslc-N//2,middleslc+N//2):
         if np.sum(aortamask_segmented[:,:,slc]==seg+1):
-          x0,y0 = roi.cog(SUV[:,:,slc]*(aortamask_segmented[:,:,slc]==seg+1))
+          x0,y0 = lib.cog(SUV[:,:,slc]*(aortamask_segmented[:,:,slc]==seg+1))
           VOI[y0-1:y0+2,x0-1:x0+2,slc,seg] = 1
     else:
       # Aortic Arch
@@ -335,23 +315,6 @@ if __name__ == '__main__':
     ### Extract IDIF as the mean inside the VOI ###
     idif[:,seg] = np.mean(deck[np.squeeze(VOI[:,:,:,seg])], axis=0)
 
-    ### Write NIfTI file of SUV data
-    #niftifile = os.path.join(args.outdir,'VOI_segment-'+str(seg+1)+'.nii.gz')
-    #if not os.path.isfile(niftifile):
-    #    print('Store VOI as NIfTI')
-    #    # Use transformation matrix from DICOM header
-    #    OM = hdr_pet['Affine3D']
-
-    #    # Create NIFTI object
-    #    header = nib.Nifti1Header()
-    #    header.set_data_shape(VOI[:,:,:,seg].shape)
-    #    header.set_dim_info(slice=2)
-    #   header.set_xyzt_units('mm')
-
-    #    ### TODO: LIKELY MORE INFO SHOULD BE ADDED TO THE NIFTI FILE HERE ###
-    #    nifti =  nib.Nifti1Image(VOI[:,:,:,seg], OM, header=header)
-    #    nib.save(nifti, niftifile)
-
     # Save VOI as numpy array
     voifile = os.path.join(args.outdir,'VOI.npy')
     #np.save(voifile,VOI)
@@ -359,39 +322,10 @@ if __name__ == '__main__':
     # Write IDIF to file
     lib.tacwrite(FrameTimesStart,FrameDuration,idif[:,seg],'Bq/cc',os.path.join(args.outdir,'IDIF_'+method.lower()+'_segment-'+str(seg+1)+'.tac'),['idif'])
 
-    # Create plot for evalutating aorta mask position on SUV PET
-    plotting.ortoshow(mean,overlay=VOI[...,0]+(VOI[...,1]*2)+(VOI[...,2]*3)+(VOI[...,3]*4), vmin=0, vmax=20, cmap='tab20', voxdim=voxdim, mip=True, outfile=os.path.join(args.outdir,'VOI_orto.pdf'))
-    print(os.path.join(args.outdir,'VOI_orto.pdf'))
-
-    # Save a tsv file with IDIF stats
-    tsvfilename = os.path.join(args.outdir,method.lower()+'_IDIF.tsv')
-    print('Finished')
-    exit()
-    # Headers
-    fieldnames = ['Method','Radiopharmaceutical','PatientWeight','RadionuclideTotalDose','Segment','Region','Unit','AUC40','Peak','Slope']
-  with open(tsvfilename,'w') as tsvfile:
-    # Create csv writer with tab delimiter
-    writer = csv.writer(tsvfile, delimiter='\t')
-
-    # Write header row
-    writer.writerow(fieldnames)
-
-    for seg in range(4):
-      # Calculate metrics in native units (typical Bq/ml)
-      auc_bq = np.trapz(idif[suvframes,seg], x=MidFrameTime[suvframes])
-      peak_bq = np.amax(idif[:,seg])# Peak value is found within the entire duration
-      slope_bq = np.amax(np.diff(idif[suvframes,seg]))
-
-      writer.writerow([method,hdr_pet['Radiopharmaceutical'],hdr_pet['PatientWeight'],hdr_pet['RadionuclideTotalDose'],seg+1,segments[seg],hdr_pet['Unit'],auc_bq,peak_bq,slope_bq])
-
-      # Calculate metrics in SUV units
-      idif_suv = idif[:,seg] * hdr_pet['PatientWeight'] * 1000 / hdr_pet['RadionuclideTotalDose']
-      auc_suv = np.trapz(idif_suv[suvframes], x=MidFrameTime[suvframes])
-      peak_suv = np.amax(idif_suv) # Peak value is found within the entire duration
-      slope_suv = np.amax(np.diff(idif_suv[suvframes]))
-
-      writer.writerow([method,hdr_pet['Radiopharmaceutical'],hdr_pet['PatientWeight'],hdr_pet['RadionuclideTotalDose'],seg+1,segments[seg],'SUV',auc_suv,peak_suv,slope_suv])
-
+  # Create plot for evalutating aorta mask position on SUV PET
+  overlay = VOI[...,0]+(VOI[...,1]*2)+(VOI[...,2]*3)+(VOI[...,3]*4)
+  lib.ortoshow(SUV,overlay=overlay, vmin=0, vmax=2*median, cmap='tab20', voxdim=voxdim, mip=True, outfile=os.path.join(args.outdir,'VOI_orto.pdf'))
+  print(os.path.join(args.outdir,'VOI_orto.pdf'))
 
   # Create figure
   fig, ax = plt.subplots(2,1)
@@ -400,13 +334,17 @@ if __name__ == '__main__':
   ax[0].plot(MidFrameTime, idif[:,2], label=segments[2])
   ax[0].plot(MidFrameTime, idif[:,3], label=segments[3])
   ax[0].legend()
-  ax[0].set_ylabel('Concentration ' + hdr_pet['Unit'])
+  ax[0].set_ylabel('Concentration')
 
-  ax[1].plot(MidFrameTime[suvframes], idif[suvframes,0])
-  ax[1].plot(MidFrameTime[suvframes], idif[suvframes,1])
-  ax[1].plot(MidFrameTime[suvframes], idif[suvframes,2])
-  ax[1].plot(MidFrameTime[suvframes], idif[suvframes,3])
+  ax[1].plot(MidFrameTime[frames], idif[frames,0])
+  ax[1].plot(MidFrameTime[frames], idif[frames,1])
+  ax[1].plot(MidFrameTime[frames], idif[frames,2])
+  ax[1].plot(MidFrameTime[frames], idif[frames,3])
   ax[1].set_xlabel('Time [s]')
-  ax[1].set_ylabel('Concentration ' + hdr_pet['Unit'])
+  ax[1].set_ylabel('Concentration')
   plt.savefig(os.path.join(args.outdir,method+'_IDIF.pdf'), format='pdf')
   plt.close()
+
+  print(os.path.join(args.outdir,method+'_IDIF.pdf'))
+
+  print('Finished')
